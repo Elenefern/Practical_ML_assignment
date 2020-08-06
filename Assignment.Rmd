@@ -1,0 +1,177 @@
+---
+title: "Practical Machine Learning: Course Project"
+subtitle: "Predictions using the *Weight Lifting Exercise Dataset*"
+output: 
+  html_document:
+    keep_md: true
+    author: "E. Fernandez"
+    Date: "5th August 2020"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path="figure/", cache = TRUE)
+```
+
+## Introduction
+This report is produced as part of the course project for the Practical Machine Learning course in Coursera's Data Science Specialization
+
+The goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which exercises are done. The quality or manner of the exercises performed is contained in the variable "classe", which has 5 possible values. More information on the data can be found in the section *Weight Lifting Exercise Dataset* of [this website](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har).
+
+At the end of the report, the resulting best prediction model is applied to a set of 20 test cases. These results will be submitted to the Course Project Prediction Quiz for automatic grading.
+
+
+## Exploratory data analysis and data cleaning
+
+Load required packages.
+
+```{r, results='hide', message=FALSE}
+library(caret)
+library(corrplot)
+library(rattle)
+library(rpart)
+```
+
+Load data. Note that the validation data set contains the 20 test sets for the coursera submission.
+
+```{r}
+rm(list=ls())
+if(!file.exists("data/pml-training.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "data/pml-training.csv")
+}
+data<- read.csv("data/pml-training.csv")
+
+if(!file.exists("data/pml-testing.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "data/pml-testing.csv")
+}
+validation <- read.csv("data/pml-testing.csv")
+```
+
+Split the data into training and testing sets. The seed is set to ensure reproducibility. Note that the exploratory analysis is only performed on the training set since the testing data should only be used for model assessment, never for model training. 
+
+```{r}
+set.seed(1234)
+inTrain<-createDataPartition(y=data$classe, p=0.6, list=FALSE)
+
+training<-data[inTrain,]
+testing<-data[-inTrain,]
+
+str(training)
+```
+
+To avoid overfitting and to shorten the training time, the raw dataset will be shrunk.
+
+First of all, the variables with near zero variance are removed since they will not provide much information about the outcome. It can also be seen that some columns contain many NAs. Therefore, all the columns where the percentage of NAs is over 95% are removed too. The assessment of which variables these two conditions apply to is performed only on the training set but they are also removed from the testing and validation data.
+
+```{r}
+# Remove NZV 
+nzv_idx <- nearZeroVar(training)
+
+training<-training[,-nzv_idx]
+testing<-testing[,-nzv_idx]
+validation<-validation[,-nzv_idx]
+
+# Remove NAs
+nas_idx <- colSums(is.na(training))/nrow(training) > 0.95
+
+training<-training[,nas_idx==FALSE]
+testing<-testing[,nas_idx==FALSE]
+validation<-validation[,nas_idx==FALSE]
+```
+
+Finally the first 6 columns of the datasets are removed. The prediction of the manner in which each exercise is performed shall be based on accelerometer measurements and not on timestamps and/or user information, which corresponds to be first 6 columns of data. It is highly likely that each user has performed the exercises in a sequencial order. In this case, the machine learning algorithm would detect this pattern. This would result in the time of day having a big impact on the predicted "classe". However, we know this should not be taken into account. To avoid detecting this or other irrelevant patterns, all the time and user information is removed.
+
+```{r}
+training<-training[,-(1:6)]
+testing<-testing[,-(1:6)]
+validation<-validation[,-(1:6)]
+```
+
+The resulting reduced dataset contains 53 variables out of which 52 are predictors and the 53rd is the variable to be predicted, "classe".
+
+Before jumping into model building, a last analysis on the correlation among variables is performed. High correlated variables usually tend to contain similar information. This is why, it is quite common to remove them. However, in this dataset only 4 variables have a correlation over 0.95. Keeping or removing them should not have a big impact. Therefore, they will be kept in the data sets. The effect of removing highly correlated variables will be shown in the model building section, where two random forest algorithms will be built with and without preprocessing the data with PCA (Principal Component Analysis).
+
+```{r}
+corMatrix<-cor(training[,-53]) # remove classe from correlation matrix.
+corHigh <- findCorrelation(corMatrix, cutoff = 0.95); # find variables with correlation higher than 0.95
+names(training[,corHigh]) 
+corrplot(corMatrix, type = "lower", order = "hclust", tl.col = "black", method = "color", tl.srt = 45, sub="hj")
+```
+
+## Model Building
+
+In this section the prediction model will be built. To be able to select the best model four different algorithms will be used and the one resulting in the highest out-of-sample accuracy will be chosen. The selected algorithms are:
+
+1. Decision tree.
+2. Random forest.
+3. Random forest with PCA pre-processing.
+4. Generalized Boosted Model (GBM).
+
+The decision tree algorithm has been chosen due to its simplicity and interpretability. Random Forest and Generalized Boosted Model are the most widely used ones and produce highly accurate prediction models. In order to visualize the effect of removing highly correlated features, the Random Forest algorithm will be implemented twice, with and without pre processing the training data with PCA.  
+
+
+### 1. Decision tree
+
+```{r tree, cache = TRUE}
+set.seed(1234)
+treeModFit <- rpart(classe ~ ., data=training, method="class") # build model
+fancyRpartPlot(treeModFit, sub="")
+
+treePred<-predict(treeModFit, testing, type="class") # predict for testing set
+treeCm<-confusionMatrix(treePred, testing$classe); treeCm # calculate confusion matrix 
+```
+
+### 2. Random Forest
+
+```{r randomForest, cache = TRUE}
+set.seed(1234)
+startRf <- Sys.time()
+rfModFit <- train(classe ~ ., method = "rf", data = training) # build model
+endRf <- Sys.time()
+timeRf <- endRf - startRf; timeRf
+
+rfPred <- predict(rfModFit,testing) # predict for testing set
+rfCm<-confusionMatrix(testing$classe,rfPred); rfCm # calculate confusion matrix 
+```
+
+### 3. Random forest with PCA pre-processing
+
+```{r rfPCA, cache = TRUE}
+pca <- preProcess(training[,-53], method = "pca", thresh = 0.5) # Perform PCA. This extracts only the variables that explain 50% of the variance
+pcaTraining <- predict(pca, training[,-53])
+pcaTraining$classe<-training$classe
+
+set.seed(1234)
+startRfPca <- Sys.time()
+rfPcaModFit <- train(classe ~ ., method = "rf", data = pcaTraining) # build model
+endRfPca <- Sys.time()
+timeRfPca <- endRfPca - startRfPca; timeRfPca
+
+rfPcaPred <- predict(rfPcaModFit,predict(pca, testing[,-53])) # predict for testing set
+rfPcaCm<-confusionMatrix(testing$classe, rfPcaPred); rfPcaCm # calculate confusion matrix 
+```
+
+### 4. Generalized Boosted Model (GBM)
+
+```{r gbm, cache = TRUE}
+set.seed(1234)
+startGbm <- Sys.time()
+gbmModFit <- train(classe ~ ., method="gbm", data = training, verbose=F) # build model
+endGbm <- Sys.time()
+timeGbm <- endGbm - startGbm
+
+gbmPred <- predict(gbmModFit, testing) # predict for testing set
+gbmCm<-confusionMatrix(testing$classe, gbmPred); gbmCm # calculate confusion matrix 
+```
+
+### Conclusion
+
+Based on the out-of-sample accuracy of the results obtained by predicting the same testing data on all four models, the **Random Forest model** turns out to be the best. The obtained accuracy is `r toString(round(rfCm$overall[1], digits=4))`, in other words, the out-of-sample error is `r toString(round(1-rfCm$overall[1], digits=4))`. Note that this extra accuracy comes at a computational cost. Hence, the suitability of an algorithm depends on the characteristics and needs of each specific problem. 
+
+## Validation results
+
+The predictions for the validation set have been performed using the ranfom forest model as discussed in the previous section.
+
+```{r}
+results<-predict(rfModFit, newdata=validation); results
+```
+

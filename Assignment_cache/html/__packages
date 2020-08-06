@@ -1,0 +1,9 @@
+base
+lattice
+ggplot2
+caret
+corrplot
+tibble
+bitops
+rattle
+rpart
